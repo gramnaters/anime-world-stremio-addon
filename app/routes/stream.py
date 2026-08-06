@@ -1,0 +1,120 @@
+import urllib.parse
+from flask import Blueprint, abort
+from .manifest import MANIFEST
+
+from app.routes import wawin_client
+from app.routes.utils import respond_with
+from app.database import db
+from app.mapper import get_or_create_slug_mapping
+
+stream_bp = Blueprint('stream', __name__)
+
+
+def process_stream_sync(stream_data, preferred_lang=None):
+    """Process a single stream source"""
+    from app.players.zephyrflick import get_video_from_zephyrflick_player
+    import asyncio
+    import nest_asyncio
+    
+    player = stream_data.get('player')
+    url = stream_data.get('url')
+    
+    if player == 'zephyrflick':
+        try:
+            # Allow nested event loops
+            nest_asyncio.apply()
+            
+            try:
+                loop = asyncio.get_event_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+            
+            video_url, quality, headers, subtitles = loop.run_until_complete(
+                get_video_from_zephyrflick_player(url, preferred_lang)
+            )
+        except Exception as e:
+            print(f"Error processing stream: {e}")
+            return None
+    else:
+        return None
+    
+    if not video_url:
+        return None
+
+    stream_obj = {
+        'title': f'[{player}][{quality}]',
+        'url': video_url,
+        'behaviorHints': {
+            # Mark as notWebReady so Stremio Web routes through its local
+            # Streaming Server (which respects proxyHeaders) instead of trying
+            # to fetch the URL from the browser directly (which would fail CORS).
+            'notWebReady': True
+        }
+    }
+
+    # `headers` is expected to be either None or a dict shaped like
+    # {'request': {Referer, User-Agent, Origin}} (the Stremio proxyHeaders spec).
+    # When set, Stremio desktop / mobile / web+streaming-server will send those
+    # headers when fetching `video_url` AND its HLS segments directly from the
+    # upstream - so the addon server never has to relay video bytes.
+    if headers:
+        stream_obj['behaviorHints']['proxyHeaders'] = headers
+
+    if subtitles:
+        stream_obj['subtitles'] = [
+            {'id': sub.get('id', sub['url']), 'url': sub['url'], 'lang': sub['lang']}
+            for sub in subtitles
+        ]
+
+    return stream_obj
+
+
+@stream_bp.route('/stream/<content_type>/<content_id>.json')
+@stream_bp.route('/<lang>/stream/<content_type>/<content_id>.json')
+def addon_stream(content_type: str, content_id: str, lang: str = None):
+    """
+    Provide stream URLs
+    :param content_type: The type of content
+    :param content_id: The id of the content (tt13706018:3:2 for series or tt13706018 for movies)
+    :param lang: Optional preferred audio language (e.g. 'hin', 'eng', 'jpn')
+    :return: JSON response
+    """
+    content_id = urllib.parse.unquote(content_id)
+    parts = content_id.split(":")
+
+    if content_type not in MANIFEST['types']:
+        abort(404)
+
+    if len(parts) < 1 or not parts[0].startswith('tt'):
+        return respond_with({'streams': []}, use_etag=False)
+
+    imdb_id = parts[0]
+    
+    # Find or create slug mapping from IMDB ID
+    slug = get_or_create_slug_mapping(imdb_id)
+    if not slug:
+        return respond_with({'streams': []}, use_etag=False)
+    
+    # For series: tt13706018:3:2, for movies: tt13706018
+    if len(parts) == 3:
+        season = int(parts[1])
+        episode = int(parts[2])
+    else:
+        # Movies don't have season/episode
+        season = None
+        episode = None
+
+    try:
+        data = wawin_client.get_episode_streams(slug, season, episode)
+        streams = []
+        
+        for stream_data in data.get('streams', []):
+            stream = process_stream_sync(stream_data, lang)
+            if stream:
+                streams.append(stream)
+        
+        return respond_with({'streams': streams}, use_etag=False)
+    except Exception as e:
+        print(f"Error getting streams: {e}")
+        return respond_with({'streams': []}, use_etag=False)

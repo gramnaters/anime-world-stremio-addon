@@ -1,0 +1,39 @@
+# Render.com deployment configuration for anime-world-stremio-addon
+# https://render.com/docs/blueprint-spec
+#
+# Quick deploy:
+#   1. Push this repo to GitHub
+#   2. Go to https://render.com -> New -> Blueprint -> select your repo
+#   3. Render will read this file and create the service for you
+#   4. Set TMDB_API_KEY in the Render dashboard (Environment tab)
+#   5. After deploy, your addon will be at https://<service-name>.onrender.com
+
+services:
+  - type: web
+    name: anime-world-stremio-addon
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -c gunicorn_config.py run:app
+    healthCheckPath: /manifest.json
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: TMDB_API_KEY
+        # REQUIRED - set this in the Render dashboard after create
+        sync: false
+      - key: STREAM_MODE
+        value: direct
+      - key: WAW_BASE_URL
+        value: https://watchanimeworld.top
+      - key: ZEPHYR_PLAYER_BASE
+        value: https://play.zephyrix.top
+      - key: DB_TYPE
+        value: sqlite
+      - key: DB_PATH
+        value: /tmp/mappings.db
+        # NOTE: Render's free tier has an ephemeral filesystem - the DB will
+        # reset on each deploy. This is fine because TMDB mappings are cached
+        # in-memory anyway. For persistent storage, use the built-in PostgreSQL
+        # and set DB_TYPE=postgresql + DATABASE_URL.
